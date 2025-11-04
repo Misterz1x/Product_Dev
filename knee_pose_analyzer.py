@@ -6,17 +6,15 @@ from ultralytics import YOLO
 from datetime import datetime
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
-
+import torch
 
 # -----------------------------
 # Configuration
 # -----------------------------
-MODEL_PATH = 'yolov8n-pose.pt'
-SAVE_FPS = 30.0
-KNEE_SIDE = 'left'  # choose 'left' or 'right'
+MODEL_PATH = 'yolo11n-pose.pt'   # Fast & small model
+SAVE_FPS = 60.0
 SAVE_DIR_VID = 'data_recordings'
 SAVE_DIR_PLOTS = 'data_plots'
-
 
 # -----------------------------
 # Helper: Calculate joint angle
@@ -29,44 +27,24 @@ def calculate_angle(a, b, c):
     cosine = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
     return np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
 
-
-# -----------------------------
-# Helper: Draw selected keypoints
-# -----------------------------
-def draw_selected_leg(frame, keypoints, side='left'):
-    """Draw only the hip_knee_ankle keypoints for the chosen leg."""
-    if side == 'left':
-        hip_idx, knee_idx, ankle_idx = 11, 13, 15
-        color = (0, 255, 0)
-    else:
-        hip_idx, knee_idx, ankle_idx = 12, 14, 16
-        color = (0, 128, 255)
-
-    pts = [keypoints[hip_idx], keypoints[knee_idx], keypoints[ankle_idx]]
-
-    # Draw small circles and connecting lines
-    for pt in pts:
-        cv2.circle(frame, (int(pt[0]), int(pt[1])), 6, color, -1)
-    cv2.line(frame, (int(pts[0][0]), int(pts[0][1])),
-             (int(pts[1][0]), int(pts[1][1])), color, 3)
-    cv2.line(frame, (int(pts[1][0]), int(pts[1][1])),
-             (int(pts[2][0]), int(pts[2][1])), color, 3)
-    return frame
-
-
 # -----------------------------
 # Step 1: Record with camera
 # -----------------------------
 def record_video():
-    model = YOLO(MODEL_PATH)
-    cap = cv2.VideoCapture(0)
-
-    # Create save directory if missing
     os.makedirs(SAVE_DIR_VID, exist_ok=True)
+    model = YOLO(MODEL_PATH)
 
+    # Use GPU (with half precision for speed)
+    if torch.cuda.is_available():
+        model.to("cuda")
+        model.model.half()
+        print("🚀 Using GPU in half precision mode")
+    else:
+        print("💻 Using CPU")
+
+    cap = cv2.VideoCapture(0)
     recording = False
-    out = None
-    filename = None
+    out, filename = None, None
 
     print("Press 'r' to start/stop recording, 'q' to quit.")
 
@@ -76,16 +54,11 @@ def record_video():
             break
 
         # Run YOLO pose inference
-        results = model(frame)
-        keypoints = results[0].keypoints.xy.cpu().numpy() if results[0].keypoints is not None else None
+        results = model.predict(frame, verbose=False)
+        annotated_frame = results[0].plot()  # built-in visualization
 
-        annotated_frame = frame.copy()
-        if keypoints is not None and len(keypoints) > 0:
-            # Use the first detected person
-            annotated_frame = draw_selected_leg(annotated_frame, keypoints[0], side=KNEE_SIDE)
-
-        # Display live view
-        cv2.imshow("YOLOv8 Pose Estimation", annotated_frame)
+        # Show live feed
+        cv2.imshow("YOLO Pose Estimation", annotated_frame)
         key = cv2.waitKey(1) & 0xFF
 
         # Toggle recording
@@ -103,11 +76,9 @@ def record_video():
                 out.release()
                 print(f"⏹ Recording stopped: {filename}")
 
-        # Save annotated frames if recording
         if recording and out is not None:
             out.write(annotated_frame)
 
-        # Quit
         if key == ord('q'):
             break
 
@@ -122,17 +93,14 @@ def record_video():
 # -----------------------------
 # Step 2: Analyze the video
 # -----------------------------
-def analyze_video(video_path):
+def analyze_video(video_path, analyze_side="both"):
     print(f"\n📊 Analyzing: {video_path}")
     model = YOLO(MODEL_PATH)
-
-    # Create save directory if missing
     os.makedirs(SAVE_DIR_PLOTS, exist_ok=True)
 
-    if KNEE_SIDE == 'left':
-        hip_idx, knee_idx, ankle_idx = 11, 13, 15
-    else:
-        hip_idx, knee_idx, ankle_idx = 12, 14, 16
+    # Define keypoint indices
+    left_leg = (11, 13, 15)
+    right_leg = (12, 14, 16)
 
     cap = cv2.VideoCapture(video_path)
     frame_idx = 0
@@ -143,19 +111,22 @@ def analyze_video(video_path):
         if not ret:
             break
 
-        results = model(frame)
+        results = model.predict(frame, verbose=False)
         keypoints = results[0].keypoints.xy.cpu().numpy() if results[0].keypoints is not None else None
 
         if keypoints is not None and len(keypoints) > 0:
             kp = keypoints[0]
-            hip, knee, ankle = kp[hip_idx], kp[knee_idx], kp[ankle_idx]
-            angle = calculate_angle(hip, knee, ankle)
-            data.append({
-                "frame": frame_idx,
-                "knee_angle": angle,
-                "knee_x": knee[0],
-                "knee_y": knee[1]
-            })
+            row = {"frame": frame_idx}
+
+            if analyze_side in ["left", "both"]:
+                left_angle = calculate_angle(kp[left_leg[0]], kp[left_leg[1]], kp[left_leg[2]])
+                row["left_knee_angle"] = left_angle
+
+            if analyze_side in ["right", "both"]:
+                right_angle = calculate_angle(kp[right_leg[0]], kp[right_leg[1]], kp[right_leg[2]])
+                row["right_knee_angle"] = right_angle
+
+            data.append(row)
 
         frame_idx += 1
 
@@ -166,42 +137,52 @@ def analyze_video(video_path):
         print("⚠️ No keypoints detected — check your video.")
         return
 
-    # Smooth angle values
-    if len(df) > 11:
-        df["knee_angle_smooth"] = savgol_filter(df["knee_angle"], 11, 3)
-    else:
-        df["knee_angle_smooth"] = df["knee_angle"]
+    # Smooth available angles
+    for side in ["left", "right"]:
+        if f"{side}_knee_angle" in df.columns:
+            if len(df) > 11:
+                df[f"{side}_knee_angle_smooth"] = savgol_filter(df[f"{side}_knee_angle"], 11, 3)
+            else:
+                df[f"{side}_knee_angle_smooth"] = df[f"{side}_knee_angle"]
 
-    # --- Plot angle over time ---
+    # --- Plot angles over time ---
     plt.figure(figsize=(8, 4))
-    plt.plot(df["frame"], df["knee_angle"], label="Raw", alpha=0.5)
-    plt.plot(df["frame"], df["knee_angle_smooth"], label="Smoothed", linewidth=2)
-    plt.title(f"{KNEE_SIDE.capitalize()} Knee Angle Over Time")
+    if "left_knee_angle_smooth" in df:
+        plt.plot(df["frame"], df["left_knee_angle_smooth"], label="Left Knee", color="green")
+    if "right_knee_angle_smooth" in df:
+        plt.plot(df["frame"], df["right_knee_angle_smooth"], label="Right Knee", color="orange")
+    plt.title("Knee Angle Over Time")
     plt.xlabel("Frame")
     plt.ylabel("Angle (degrees)")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(SAVE_DIR_PLOTS, f"{KNEE_SIDE}_knee_angle_plot.png"))
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = os.path.join(SAVE_DIR_PLOTS, f"knee_angle_plot_{analyze_side}{timestamp}.png")
+    plt.savefig(filename)
     plt.show()
 
-    # --- Plot trajectory ---
-    plt.figure(figsize=(4, 6))
-    plt.plot(df["knee_x"], df["knee_y"], marker="o", markersize=2)
-    plt.gca().invert_yaxis()
-    plt.title(f"{KNEE_SIDE.capitalize()} Knee Trajectory")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.tight_layout()
-    plt.savefig(os.path.join(SAVE_DIR_PLOTS, f"{KNEE_SIDE}_knee_trajectory_plot.png"))
-    plt.show()
-
-    print("✅ Analysis complete!")
+    print(f"✅ Analysis complete! Saved plot: {filename}")
 
 
 # -----------------------------
 # Main
 # -----------------------------
 if __name__ == "__main__":
+    # Ask user for analysis mode
+    print("\nChoose which leg(s) to analyze:")
+    print("1 - Left leg")
+    print("2 - Right leg")
+    print("3 - Both legs")
+    choice = input("Enter choice (1/2/3): ").strip()
+
+    if choice == "1":
+        analyze_side = "left"
+    elif choice == "2":
+        analyze_side = "right"
+    else:
+        analyze_side = "both"
+
     video_file = record_video()
     if video_file:
-        analyze_video(video_file)
+        analyze_video(video_file, analyze_side)

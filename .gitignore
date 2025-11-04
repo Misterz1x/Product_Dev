@@ -110,5 +110,5 @@ ENV/
 # folders
 data/
 dev/
-data/recordings/
-data/plots/
+data_recordings/
+data_plots/
