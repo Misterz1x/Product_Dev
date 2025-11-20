@@ -25,7 +25,8 @@ def calculate_angle(a, b, c):
     v1 = a - b
     v2 = c - b
     cosine = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-    return np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    return (180 - angle)
 
 # -----------------------------
 # Step 1: Record with camera
