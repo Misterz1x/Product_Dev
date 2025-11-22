@@ -1,5 +1,5 @@
-import cv2
 import os
+import cv2
 import numpy as np
 import pandas as pd
 from ultralytics import YOLO
@@ -7,114 +7,45 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks
 import torch
-import time
 
 # -----------------------------
 # Configuration
 # -----------------------------
 MODEL_PATH = 'yolo11n-pose.pt'   # Fast & small model
-SAVE_DIR_VID = 'data_recordings'
-SAVE_DIR_PLOTS = 'data_plots'
+SAVE_FPS = 30.0
+SAVE_DIR_PLOTS = 'plots'
 
 # -----------------------------
 # Helper: Calculate joint angle
 # -----------------------------
 def calculate_angle(a, b, c):
+    """Calculate the angle at point b given three points (a-b-c)."""
     a, b, c = np.array(a), np.array(b), np.array(c)
     v1 = a - b
     v2 = c - b
-    cosine = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
+    cosine = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
     angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
-    return (180 - angle)
+    return 2 * (180 - angle)  # straight = 0°, bent = increasing
 
 # -----------------------------
 # Extract one gait cycle
 # -----------------------------
-def extract_gait_cycle(angle_signal, fps=30):
+def extract_gait_cycle(angle_signal, fps=60):
+    """Detect one gait cycle based on minima (heel strikes). Returns normalized 100-point cycle."""
     minima, _ = find_peaks(-angle_signal, distance=int(0.3 * fps))
     if len(minima) < 2:
         print("⚠️ Not enough gait cycles detected.")
         return None
     start, end = minima[0], minima[1]
     cycle = angle_signal[start:end]
-    cycle_norm = np.interp(np.linspace(0, len(cycle)-1, 100), np.arange(len(cycle)), cycle)
+    cycle_norm = np.interp(np.linspace(0, len(cycle) - 1, 100),
+                           np.arange(len(cycle)), cycle)
     return cycle_norm
-
-# -----------------------------
-# Record video (real FPS)
-# -----------------------------
-def record_video():
-    os.makedirs(SAVE_DIR_VID, exist_ok=True)
-    model = YOLO(MODEL_PATH)
-
-    if torch.cuda.is_available():
-        model.to("cuda")
-        model.model.half()
-        print("🚀 Using GPU in half precision mode")
-    else:
-        print("💻 Using CPU")
-
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("❌ Cannot open camera")
-        return None
-
-    camera_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    print(f"Camera FPS detected: {camera_fps}")
-    frame_interval = 1.0 / camera_fps
-
-    recording = False
-    out, filename = None, None
-    print("Press 'r' to start/stop recording, 'q' to quit.")
-
-    while True:
-        start_time = time.time()
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        results = model.predict(frame, verbose=False)
-        annotated_frame = results[0].plot()
-
-        cv2.imshow("YOLO Pose Estimation", annotated_frame)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord('r'):
-            if not recording:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = os.path.join(SAVE_DIR_VID, f"recording_{timestamp}.mp4")
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(filename, fourcc, camera_fps,
-                                      (frame.shape[1], frame.shape[0]))
-                recording = True
-                print(f"▶ Recording started: {filename}")
-            else:
-                recording = False
-                out.release()
-                print(f"⏹ Recording stopped: {filename}")
-
-        if recording and out is not None:
-            out.write(annotated_frame)
-
-        if key == ord('q'):
-            break
-
-        # Ensure real-time FPS
-        elapsed = time.time() - start_time
-        if elapsed < frame_interval:
-            time.sleep(frame_interval - elapsed)
-
-    if out is not None:
-        out.release()
-    cap.release()
-    cv2.destroyAllWindows()
-    return filename
-
 
 # -----------------------------
 # Analyze video
 # -----------------------------
-def analyze_video(video_path, analyze_side="both", video_fps=30.0):
+def analyze_video(video_path, analyze_side="both"):
     if not os.path.isfile(video_path):
         print(f"❌ File not found: {video_path}")
         return
@@ -171,6 +102,24 @@ def analyze_video(video_path, analyze_side="both", video_fps=30.0):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # -------------------------------
+    # Plot: Knee angle vs frame
+    # -------------------------------
+    plt.figure(figsize=(8, 4))
+    if "left_knee_angle_smooth" in df:
+        plt.plot(df["frame"], df["left_knee_angle_smooth"], label="Left Knee", color="green")
+    if "right_knee_angle_smooth" in df:
+        plt.plot(df["frame"], df["right_knee_angle_smooth"], label="Right Knee", color="orange")
+    plt.title("Knee Angle Over Time")
+    plt.xlabel("Frame")
+    plt.ylabel("Angle (degrees)")
+    plt.legend()
+    plt.tight_layout()
+    filename = os.path.join(SAVE_DIR_PLOTS, f"knee_angle_plot_{analyze_side}_{timestamp}.png")
+    plt.savefig(filename)
+    plt.show()
+    print(f"📈 Saved knee/frame plot: {filename}")
+
+    # -------------------------------
     # Plot: Normalized gait cycle
     # -------------------------------
     for side in ["left", "right"]:
@@ -179,41 +128,32 @@ def analyze_video(video_path, analyze_side="both", video_fps=30.0):
         col = f"{side}_knee_angle_smooth"
         if col not in df.columns:
             continue
-
-        # <-- Pass actual video FPS here -->
-        cycle = extract_gait_cycle(df[col].values, fps=video_fps)
-
+        cycle = extract_gait_cycle(df[col].values, fps=SAVE_FPS)
         if cycle is not None:
             plt.figure(figsize=(8, 4))
             plt.plot(np.linspace(0, 100, 100), cycle, label=f"{side.capitalize()} Knee")
-            plt.xlabel("% Gait Cycle")
+            plt.xlabel("Gait Cycle (%)")
             plt.ylabel("Angle (degrees)")
             plt.title(f"{side.capitalize()} Knee - One Normalized Gait Cycle")
             plt.legend()
             plt.tight_layout()
-
-            filename_cycle = os.path.join(SAVE_DIR_PLOTS, f"{side}_gait_cycle_{timestamp}.png")
-            plt.savefig(filename_cycle)
+            filename = os.path.join(SAVE_DIR_PLOTS, f"{side}_gait_cycle_{timestamp}.png")
+            plt.savefig(filename)
             plt.show()
-            print(f"📉 Saved gait cycle plot for {side}: {filename_cycle}")
+            print(f"📉 Saved gait cycle plot for {side}: {filename}")
 
+    print("✅ Analysis complete!")
 
 # -----------------------------
 # Main
 # -----------------------------
 if __name__ == "__main__":
-    print("\nChoose which leg(s) to analyze:")
-    print("1 - Left leg")
-    print("2 - Right leg")
-    print("3 - Both legs")
-    choice = input("Enter choice (1/2/3): ").strip()
-    analyze_side = "both" if choice not in ["1", "2"] else ("left" if choice=="1" else "right")
+    import argparse
 
-    video_file = record_video()
-    if video_file:
-        cap = cv2.VideoCapture(video_file)
-        actual_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        cap.release()
+    parser = argparse.ArgumentParser(description="Analyze knee angles in a video file.")
+    parser.add_argument("video_path", type=str, help="Path to the video file to analyze")
+    parser.add_argument("--side", type=str, default="both", choices=["left", "right", "both"],
+                        help="Which leg(s) to analyze")
+    args = parser.parse_args()
 
-        analyze_video(video_file, analyze_side, video_fps=actual_fps)
-
+    analyze_video(args.video_path, analyze_side=args.side)
