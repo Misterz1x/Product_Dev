@@ -23,9 +23,13 @@ def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     v1 = a - b
     v2 = c - b
-    cosine = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    mag1 = np.linalg.norm(v1)
+    mag2 = np.linalg.norm(v2)
+    if mag1 == 0 or mag2 == 0:
+        raise ValueError("Zero-length vector encountered in angle calculation.")
+    cosine = np.dot(v1, v2) / (mag1 * mag2)
     angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
-    return 2 * (180 - angle)  # straight = 0°, bent = increasing
+    return (180 - angle)  # straight = 0°, bent = increasing
 
 # -----------------------------
 # Extract one gait cycle

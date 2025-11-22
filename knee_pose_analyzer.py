@@ -23,7 +23,14 @@ def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     v1 = a - b
     v2 = c - b
-    cosine = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
+
+    mag1 = np.linalg.norm(v1)
+    mag2 = np.linalg.norm(v2)
+
+    if mag1 == 0 or mag2 == 0:
+        raise ValueError("Zero-length vector encountered in angle calculation.")
+
+    cosine = np.dot(v1, v2) / (mag1 * mag2)
     angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
     return (180 - angle)
 
@@ -169,6 +176,26 @@ def analyze_video(video_path, analyze_side="both", video_fps=30.0):
                 df[f"{col}_smooth"] = df[col]
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+
+    # -------------------------------
+    # Plot: Knee angle vs frame
+    # -------------------------------
+    plt.figure(figsize=(8, 4))
+    if "left_knee_angle_smooth" in df:
+        plt.plot(df["frame"], df["left_knee_angle_smooth"], label="Left Knee", color="green")
+    if "right_knee_angle_smooth" in df:
+        plt.plot(df["frame"], df["right_knee_angle_smooth"], label="Right Knee", color="orange")
+    plt.title("Knee Angle Over Time")
+    plt.xlabel("Frame")
+    plt.ylabel("Angle (degrees)")
+    plt.legend()
+    plt.tight_layout()
+    filename = os.path.join(SAVE_DIR_PLOTS, f"knee_angle_plot_{analyze_side}_{timestamp}.png")
+    plt.savefig(filename)
+    plt.show()
+    print(f"📈 Saved knee/frame plot: {filename}")
+
 
     # -------------------------------
     # Plot: Normalized gait cycle
