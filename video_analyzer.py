@@ -33,33 +33,47 @@ def calculate_angle(a, b, c):
 # -----------------------------
 # Extract one gait cycle
 # -----------------------------
-def extract_gait_cycle(angle_signal):
-    # 1. Detect all minima (valleys in the signal)
-    minima, _ = find_peaks(-angle_signal)
+from scipy.signal import find_peaks
+import numpy as np
 
-    if len(minima) < 2:
-        print("⚠️ Not enough minima detected for gait cycle.")
+def extract_gait_cycle(angle_signal):
+    # 1. Detect maxima (cleaner than minima for knee angle)
+    peaks, _ = find_peaks(angle_signal, distance=10)  # avoid false peaks
+
+    if len(peaks) < 2:
+        print("⚠️ Not enough peaks detected for gait cycle.")
         return None
 
-    # 2. Compute distances between minima (step durations)
-    diffs = np.diff(minima)
+    # 2. Compute distances between peaks (step durations)
+    diffs = np.diff(peaks)
 
-    # 3. Use the median step distance as the "true" gait cycle length
+    # 3. Select the most frequent (mode) step length
     cycle_len = int(np.median(diffs))
 
-    if cycle_len < 5:
-        print("⚠️ Detected cycle too short; skipping.")
+    # 4. Select the cycle whose length is closest to this ideal
+    best_start = None
+    best_error = 1e9
+
+    for i in range(len(peaks) - 1):
+        start = peaks[i]
+        end = peaks[i + 1]
+        length = end - start
+
+        error = abs(length - cycle_len)
+        if error < best_error and (end <= len(angle_signal)):
+            best_error = error
+            best_start = start
+
+    if best_start is None:
+        print("⚠️ Could not find a valid gait cycle.")
         return None
 
-    # 4. Use the first minimum as the start
-    start = minima[0]
-    end = start + cycle_len
-
-    if end > len(angle_signal):
-        print("⚠️ Not enough signal length for a full gait cycle.")
+    best_end = best_start + cycle_len
+    if best_end > len(angle_signal):
+        print("⚠️ Signal too short for full gait cycle.")
         return None
 
-    cycle = angle_signal[start:end]
+    cycle = angle_signal[best_start:best_end]
 
     # 5. Normalize to 100 points
     cycle_norm = np.interp(
@@ -69,6 +83,7 @@ def extract_gait_cycle(angle_signal):
     )
 
     return cycle_norm
+
 
 # -----------------------------
 # Analyze video
