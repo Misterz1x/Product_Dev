@@ -37,15 +37,43 @@ def calculate_angle(a, b, c):
 # -----------------------------
 # Extract one gait cycle
 # -----------------------------
-def extract_gait_cycle(angle_signal, fps=30):
-    minima, _ = find_peaks(-angle_signal, distance=int(0.3 * fps))
+def extract_gait_cycle(angle_signal):
+    # 1. Detect all minima (valleys in the signal)
+    minima, _ = find_peaks(-angle_signal)
+
     if len(minima) < 2:
-        print("⚠️ Not enough gait cycles detected.")
+        print("⚠️ Not enough minima detected for gait cycle.")
         return None
-    start, end = minima[0], minima[1]
+
+    # 2. Compute distances between minima (step durations)
+    diffs = np.diff(minima)
+
+    # 3. Use the median step distance as the "true" gait cycle length
+    cycle_len = int(np.median(diffs))
+
+    if cycle_len < 5:
+        print("⚠️ Detected cycle too short; skipping.")
+        return None
+
+    # 4. Use the first minimum as the start
+    start = minima[0]
+    end = start + cycle_len
+
+    if end > len(angle_signal):
+        print("⚠️ Not enough signal length for a full gait cycle.")
+        return None
+
     cycle = angle_signal[start:end]
-    cycle_norm = np.interp(np.linspace(0, len(cycle)-1, 100), np.arange(len(cycle)), cycle)
+
+    # 5. Normalize to 100 points
+    cycle_norm = np.interp(
+        np.linspace(0, len(cycle)-1, 100),
+        np.arange(len(cycle)),
+        cycle
+    )
+
     return cycle_norm
+
 
 # -----------------------------
 # Record video (real FPS)
@@ -54,6 +82,7 @@ def record_video():
     os.makedirs(SAVE_DIR_VID, exist_ok=True)
     model = YOLO(MODEL_PATH)
 
+    # GPU setup
     if torch.cuda.is_available():
         model.to("cuda")
         model.model.half()
@@ -66,50 +95,89 @@ def record_video():
         print("❌ Cannot open camera")
         return None
 
-    camera_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    print(f"Camera FPS detected: {camera_fps}")
-    frame_interval = 1.0 / camera_fps
+    print("Press 'r' to start/stop recording, 'q' to quit.")
 
     recording = False
     out, filename = None, None
-    print("Press 'r' to start/stop recording, 'q' to quit.")
+
+    # ---------------------------
+    # FPS Measurement Variables
+    # ---------------------------
+    prev_time = time.time()
+    smoothed_fps = 0
+    alpha = 0.1    # smoothing factor
 
     while True:
-        start_time = time.time()
+        frame_start = time.time()
+
         ret, frame = cap.read()
         if not ret:
             break
 
+        # Run YOLO
         results = model.predict(frame, verbose=False)
         annotated_frame = results[0].plot()
 
+        # ---------------------------
+        # FPS MEASUREMENT
+        # ---------------------------
+        now = time.time()
+        instant_fps = 1 / (now - prev_time)
+        prev_time = now
+
+        # Smooth out the FPS so it doesn't jump
+        if smoothed_fps == 0:
+            smoothed_fps = instant_fps
+        else:
+            smoothed_fps = alpha * instant_fps + (1 - alpha) * smoothed_fps
+
+        # Debug print (optional)
+        # print(f"FPS: {smoothed_fps:.2f}")
+
+        # ---------------------------
+        # DISPLAY FRAME
+        # ---------------------------
         cv2.imshow("YOLO Pose Estimation", annotated_frame)
         key = cv2.waitKey(1) & 0xFF
 
+        # ---------------------------
+        # START / STOP RECORDING
+        # ---------------------------
         if key == ord('r'):
             if not recording:
+                # Start recording
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 filename = os.path.join(SAVE_DIR_VID, f"recording_{timestamp}.mp4")
+
+                # Clamp FPS between 5 and 30 for stability
+                fps_to_use = max(5, min(int(smoothed_fps), 30))
+
+                h, w = annotated_frame.shape[:2]
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(filename, fourcc, camera_fps,
-                                      (frame.shape[1], frame.shape[0]))
+                out = cv2.VideoWriter(filename, fourcc, fps_to_use, (w, h))
+
                 recording = True
-                print(f"▶ Recording started: {filename}")
+                print(f"▶ Recording started at {fps_to_use} FPS → {filename}")
+
             else:
+                # Stop recording
                 recording = False
                 out.release()
                 print(f"⏹ Recording stopped: {filename}")
 
+        # Save frames while recording
         if recording and out is not None:
             out.write(annotated_frame)
 
+        # Quit
         if key == ord('q'):
             break
 
-        # Ensure real-time FPS
-        elapsed = time.time() - start_time
-        if elapsed < frame_interval:
-            time.sleep(frame_interval - elapsed)
+        # ---------------------------
+        # NOTE:
+        # Do *not* try to enforce FPS manually with sleep().
+        # The FPS should be whatever your machine actually achieves.
+        # ---------------------------
 
     if out is not None:
         out.release()
@@ -118,10 +186,11 @@ def record_video():
     return filename
 
 
+
 # -----------------------------
 # Analyze video
 # -----------------------------
-def analyze_video(video_path, analyze_side="both", video_fps=30.0):
+def analyze_video(video_path, analyze_side="both"):
     if not os.path.isfile(video_path):
         print(f"❌ File not found: {video_path}")
         return
@@ -226,7 +295,7 @@ def analyze_video(video_path, analyze_side="both", video_fps=30.0):
             continue
 
         # <-- Pass actual video FPS here -->
-        cycle = extract_gait_cycle(df[col].values, fps=video_fps)
+        cycle = extract_gait_cycle(df[col].values)
 
         if cycle is not None:
             plt.figure(figsize=(8, 4))
@@ -270,14 +339,14 @@ if __name__ == "__main__":
     print("1 - Left leg")
     print("2 - Right leg")
     print("3 - Both legs")
+
     choice = input("Enter choice (1/2/3): ").strip()
-    analyze_side = "both" if choice not in ["1", "2"] else ("left" if choice=="1" else "right")
+    analyze_side = "both" if choice not in ["1", "2"] else ("left" if choice == "1" else "right")
 
+    # Record the video
     video_file = record_video()
-    if video_file:
-        cap = cv2.VideoCapture(video_file)
-        actual_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        cap.release()
 
-        analyze_video(video_file, analyze_side, video_fps=actual_fps)
+    # If recording was successful
+    if video_file:
+        analyze_video(video_file, analyze_side)
 
