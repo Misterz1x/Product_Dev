@@ -265,23 +265,33 @@ def analyze_video(video_path, analyze_side="both"):
 
     
 
+    # ----------------------------------------------------
+    # Convert frames → seconds using the real video FPS
+    # ----------------------------------------------------
+    cap_check = cv2.VideoCapture(video_path)
+    video_fps = cap_check.get(cv2.CAP_PROP_FPS)
+    cap_check.release()
+
+    df["time_sec"] = df["frame"] / video_fps
+    print(f"🎞 Detected video FPS: {video_fps:.2f}")
+
     # -------------------------------
     # Plot: Knee angle vs frame
     # -------------------------------
     plt.figure(figsize=(8, 4))
     if "left_knee_angle_smooth" in df:
-        plt.plot(df["frame"], df["left_knee_angle_smooth"], label="Left Knee", color="green")
+        plt.plot(df["time_sec"], df["left_knee_angle_smooth"], label="Left Knee", color="green")
     if "right_knee_angle_smooth" in df:
-        plt.plot(df["frame"], df["right_knee_angle_smooth"], label="Right Knee", color="orange")
+        plt.plot(df["time_sec"], df["right_knee_angle_smooth"], label="Right Knee", color="orange")
     plt.title("Knee Angle Over Time")
-    plt.xlabel("Frame")
+    plt.xlabel("Time (seconds)")
     plt.ylabel("Angle (degrees)")
     plt.legend()
     plt.tight_layout()
     filename = os.path.join(SAVE_DIR_PLOTS, f"knee_angle_plot_{analyze_side}_{timestamp}.png")
     plt.savefig(filename)
     plt.show()
-    print(f"📈 Saved knee/frame plot: {filename}")
+    print(f"📈 Saved knee/time plot: {filename}")
 
 
     # -------------------------------
@@ -317,18 +327,18 @@ def analyze_video(video_path, analyze_side="both"):
     # -------------------------------
     plt.figure(figsize=(8, 4))
     if "left_hip_angle_smooth" in df:
-        plt.plot(df["frame"], df["left_hip_angle_smooth"], label="Left Hip", color="blue")
+        plt.plot(df["time_sec"], df["left_hip_angle_smooth"], label="Left Hip", color="blue")
     if "right_hip_angle_smooth" in df:
-        plt.plot(df["frame"], df["right_hip_angle_smooth"], label="Right Hip", color="red")
+        plt.plot(df["time_sec"], df["right_hip_angle_smooth"], label="Right Hip", color="red")
     plt.title("Hip Angle Over Time")
-    plt.xlabel("Frame")
+    plt.xlabel("Time (seconds)")
     plt.ylabel("Angle (degrees)")
     plt.legend()
     plt.tight_layout()
     filename = os.path.join(SAVE_DIR_PLOTS, f"hip_angle_plot_{analyze_side}_{timestamp}.png")
     plt.savefig(filename)
     plt.show()
-    print(f"📈 Saved hip/frame plot: {filename}")
+    print(f"📈 Saved hip/time plot: {filename}")
 
 
 # -----------------------------
