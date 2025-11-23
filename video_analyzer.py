@@ -156,6 +156,45 @@ def analyze_video(video_path, analyze_side="both"):
     df["time_sec"] = df["frame"] / video_fps
     print(f"🎞 Detected video FPS: {video_fps:.2f}")
 
+
+        # ----------------------------------------------------
+    # SAVE ANGLE DATA TO TEXT FILES
+    # ----------------------------------------------------
+    SAVE_DIR_ANGLES = "data_angles"
+    os.makedirs(SAVE_DIR_ANGLES, exist_ok=True)
+
+    # Create filenames
+    knee_file = os.path.join(SAVE_DIR_ANGLES, f"knee_angles_{analyze_side}_{timestamp}.txt")
+    hip_file  = os.path.join(SAVE_DIR_ANGLES, f"hip_angles_{analyze_side}_{timestamp}.txt")
+
+    # --------------------
+    # Save Knee Angles
+    # --------------------
+    knee_cols = ["time_sec"]
+    if "left_knee_angle_smooth" in df: knee_cols.append("left_knee_angle_smooth")
+    if "right_knee_angle_smooth" in df: knee_cols.append("right_knee_angle_smooth")
+
+    if len(knee_cols) > 1:
+        df[knee_cols].to_csv(knee_file, index=False, float_format="%.5f")
+        print(f"💾 Saved knee angle data → {knee_file}")
+    else:
+        print("⚠️ No knee angle data to save.")
+
+
+    # --------------------
+    # Save Hip Angles
+    # --------------------
+    hip_cols = ["time_sec"]
+    if "left_hip_angle_smooth" in df: hip_cols.append("left_hip_angle_smooth")
+    if "right_hip_angle_smooth" in df: hip_cols.append("right_hip_angle_smooth")
+
+    if len(hip_cols) > 1:
+        df[hip_cols].to_csv(hip_file, index=False, float_format="%.5f")
+        print(f"💾 Saved hip angle data → {hip_file}")
+    else:
+        print("⚠️ No hip angle data to save.")
+
+
     # -------------------------------
     # Plot: Knee angle vs frame
     # -------------------------------
