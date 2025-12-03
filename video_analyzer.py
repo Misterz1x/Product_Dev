@@ -35,6 +35,7 @@ def calculate_angle(a, b, c):
 # 1) Select and load MOT
 # -----------------------------
 def load_mot_columns(desired_columns):
+    print("\n📄 Please select the .mot file that you want to analyze:")
     Tk().withdraw()
     filepath = askopenfilename(
         title="Select a .mot file",
@@ -43,13 +44,13 @@ def load_mot_columns(desired_columns):
     if not filepath:
         raise ValueError("No file selected.")
 
-    df = pd.read_csv(filepath, sep=r"\s+", comment="#", header=0)
+    df = pd.read_csv(filepath, sep=r"\s+", skiprows=SKIP_ROWS, header=0)
 
     missing = [c for c in desired_columns if c not in df.columns]
     if missing:
         raise ValueError(f"Missing MOT columns: {missing}")
 
-    print("📄 Loaded MOT:", filepath)
+    print("📄 Loaded MOT file:", filepath)
     return df[desired_columns], filepath
 
 
@@ -57,6 +58,7 @@ def load_mot_columns(desired_columns):
 # 2) Select video file
 # -----------------------------
 def select_video_file():
+    print("\n🎥 Please select the .mp4 (or other) video you want to analyze:")
     Tk().withdraw()
     filepath = askopenfilename(
         title="Select a video file",
@@ -64,12 +66,28 @@ def select_video_file():
     )
     if not filepath:
         raise ValueError("No video file selected.")
+
     print("🎥 Selected video:", filepath)
     return filepath
 
 
 # -----------------------------
-# 3) Analyze video
+# 3) Ask which side to analyze
+# -----------------------------
+def ask_side_selection():
+    print("\n🔍 Please choose side to be analyzed: right, left or both")
+    side = input("Type your choice: ").strip().lower()
+
+    while side not in ["right", "left", "both"]:
+        print("Invalid input. Please choose: right, left, both")
+        side = input("Type your choice: ").strip().lower()
+
+    print(f"➡️  Selected side for analysis: {side}")
+    return side
+
+
+# -----------------------------
+# 4) Analyze video
 # -----------------------------
 def analyze_video(video_path, analyze_side="both"):
 
@@ -135,14 +153,50 @@ def analyze_video(video_path, analyze_side="both"):
     return df
 
 
+# -----------------------------
+# 5) Plotting
+# -----------------------------
+def plot_angles(video_df, analyze_side):
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # Knee plot
+    plt.figure(figsize=(8, 4))
+
+    if analyze_side in ["left", "both"] and "left_knee_angle_smooth" in video_df:
+        plt.plot(video_df["time_sec"], video_df["left_knee_angle_smooth"], label="Left Knee")
+
+    if analyze_side in ["right", "both"] and "right_knee_angle_smooth" in video_df:
+        plt.plot(video_df["time_sec"], video_df["right_knee_angle_smooth"], label="Right Knee")
+
+    plt.title("Knee Angle Over Time")
+    plt.xlabel("Time (seconds)")
+    plt.ylabel("Angle (degrees)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Hip plot
+    plt.figure(figsize=(8, 4))
+
+    if analyze_side in ["left", "both"] and "left_hip_angle_smooth" in video_df:
+        plt.plot(video_df["time_sec"], video_df["left_hip_angle_smooth"], label="Left Hip")
+
+    if analyze_side in ["right", "both"] and "right_hip_angle_smooth" in video_df:
+        plt.plot(video_df["time_sec"], video_df["right_hip_angle_smooth"], label="Right Hip")
+
+    plt.title("Hip Angle Over Time")
+    plt.xlabel("Time (seconds)")
+    plt.ylabel("Angle (degrees)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
 
 # -----------------------------
-# 4) Combine MOT + video results
+# 6) Combine MOT + video summary
 # -----------------------------
 def merge_mot_and_video(mot_df, video_df):
-    """
-    Computes mean/max angles and adds them to MOT dataframe.
-    """
     results = {}
 
     for side in ["left", "right"]:
@@ -152,7 +206,6 @@ def merge_mot_and_video(mot_df, video_df):
                 results[f"{col}_mean"] = video_df[col].mean()
                 results[f"{col}_max"] = video_df[col].max()
 
-    # Add as constant columns to mot_df
     for key, val in results.items():
         mot_df[key] = val
 
@@ -160,75 +213,38 @@ def merge_mot_and_video(mot_df, video_df):
     return mot_df
 
 
-# -------------------------------
-# Plot: Knee angle vs time (seconds)
-# -------------------------------
-plt.figure(figsize=(8, 4))
-
-if "left_knee_angle_smooth" in df:
-    plt.plot(df["time_sec"], df["left_knee_angle_smooth"], label="Left Knee")
-
-if "right_knee_angle_smooth" in df:
-    plt.plot(df["time_sec"], df["right_knee_angle_smooth"], label="Right Knee")
-
-plt.title("Knee Angle Over Time")
-plt.xlabel("Time (seconds)")
-plt.ylabel("Angle (degrees)")
-plt.legend()
-plt.tight_layout()
-#plt.savefig(os.path.join(SAVE_DIR_PLOTS, f"knee_angle_plot_{analyze_side}_{timestamp}.png"))
-plt.show()
-
-
-
-# -------------------------------
-# Plot: Hip angle vs time (seconds)
-# -------------------------------
-plt.figure(figsize=(8, 4))
-if "left_hip_angle_smooth" in df:
-    plt.plot(df["time_sec"], df["left_hip_angle_smooth"], label="Left Hip", color="blue")
-if "right_hip_angle_smooth" in df:
-    plt.plot(df["time_sec"], df["right_hip_angle_smooth"], label="Right Hip", color="red")
-plt.title("Hip Angle Over Time")
-plt.xlabel("Time (seconds)")
-plt.ylabel("Angle (degrees)")
-plt.legend()
-plt.tight_layout()
-#filename = os.path.join(SAVE_DIR_PLOTS, f"hip_angle_plot_{analyze_side}_{timestamp}.png")
-#plt.savefig(filename)
-plt.show()
-#print(f"📈 Saved hip/time plot: {filename}")
-
-print("✅ Analysis complete!")
-
-
-
 # -----------------------------
-# 5) Main workflow
+# 7) Main workflow
 # -----------------------------
 def main():
+
     desired_columns = ["time", "hip_flexion_r", "knee_angle_r"]
 
-    # 1) Load MOT
+    # 1) Load MOT file
     mot_df, mot_path = load_mot_columns(desired_columns)
 
-    # 2) Select video
+    # 2) Load video file
     video_path = select_video_file()
 
-    # 3) Analyze video
-    video_df = analyze_video(video_path)
+    # 3) Side selection
+    analyze_side = ask_side_selection()
+
+    # 4) Analyze video
+    video_df = analyze_video(video_path, analyze_side)
     if video_df is None:
         print("❌ Video analysis failed.")
         return
 
-    # 4) Merge
+    # 5) Plot
+    plot_angles(video_df, analyze_side)
+
+    # 6) Merge MOT + video summary
     combined = merge_mot_and_video(mot_df, video_df)
 
-    # Save result
-    out_file = "combined_results.csv"
+    # 7) Save result
+    out_file = "csv_files/combined_results.csv"
     combined.to_csv(out_file, index=False)
-    print("💾 Saved:", out_file)
-
+    print("\n💾 Saved:", out_file)
 
 
 # -----------------------------
