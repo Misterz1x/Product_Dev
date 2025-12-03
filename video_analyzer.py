@@ -117,7 +117,6 @@ def analyze_video(video_path, analyze_side="both"):
         if keypoints is not None and len(keypoints) > 0:
             kp = keypoints[0]
             row = {
-                "frame": frame_idx,
                 "time_sec": frame_idx / fps
             }
 
@@ -158,7 +157,7 @@ def analyze_video(video_path, analyze_side="both"):
 # -----------------------------
 def plot_angles(video_df, analyze_side):
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    #timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # Knee plot
     plt.figure(figsize=(8, 4))
@@ -194,23 +193,33 @@ def plot_angles(video_df, analyze_side):
 
 
 # -----------------------------
-# 6) Combine MOT + video summary
+# 6) Combine MOT + keypoint angles by aligning time
 # -----------------------------
 def merge_mot_and_video(mot_df, video_df):
-    results = {}
+    # Make sure MOT has a "time" column
+    mot_times = mot_df["time"].values
 
-    for side in ["left", "right"]:
-        for joint in ["knee", "hip"]:
-            col = f"{side}_{joint}_angle"
-            if col in video_df.columns:
-                results[f"{col}_mean"] = video_df[col].mean()
-                results[f"{col}_max"] = video_df[col].max()
+    # Make sure video_df has a time column
+    video_times = video_df["time_sec"].values
 
-    for key, val in results.items():
-        mot_df[key] = val
+    # For each MOT time, find the nearest video time index
+    nearest_idx = np.searchsorted(video_times, mot_times, side="left")
 
-    print("🔗 Merged MOT + video results.")
-    return mot_df
+    # Fix indices that exceed bounds
+    nearest_idx = np.clip(nearest_idx, 0, len(video_times)-1)
+
+    # Create a new dataframe equal to the original MOT
+    merged = mot_df.copy()
+
+    # For all detected angle columns
+    angle_cols = [c for c in video_df.columns if "angle" in c]
+
+    # Add one column per angle, aligned to MOT time
+    for col in angle_cols:
+        merged[col] = video_df[col].iloc[nearest_idx].values
+
+    print("🔗 Time-aligned MOT + video results merged.")
+    return merged
 
 
 # -----------------------------
@@ -218,7 +227,7 @@ def merge_mot_and_video(mot_df, video_df):
 # -----------------------------
 def main():
 
-    desired_columns = ["time", "hip_flexion_r", "knee_angle_r"]
+    desired_columns = ["time", "hip_flexion_r", "knee_angle_r", "hip_flexion_l", "knee_angle_l"]
 
     # 1) Load MOT file
     mot_df, mot_path = load_mot_columns(desired_columns)
