@@ -20,9 +20,9 @@ SKIP_ROWS = 10
 
 
 # -----------------------------
-# Helper: Calculate joint angle
+# Helper: Calculate knee angle
 # -----------------------------
-def calculate_angle(a, b, c):
+def calculate_knee_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     v1, v2 = a - b, c - b
     if np.linalg.norm(v1) == 0 or np.linalg.norm(v2) == 0:
@@ -31,6 +31,29 @@ def calculate_angle(a, b, c):
     angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
     return 180 - angle  
 
+
+# -----------------------------
+# Helper: Calculate hip angle
+# -----------------------------
+def calculate_hip_angle(a, b, c):
+    a, b, c = np.array(a), np.array(b), np.array(c)
+    
+    v1 = a - b   # proximal (trunk)
+    v2 = c - b   # distal (thigh)
+
+    if np.linalg.norm(v1) == 0 or np.linalg.norm(v2) == 0:
+        return np.nan
+
+    # Original magnitude calculation (UNCHANGED)
+    cosine = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    angle = 180 - angle   # keep your original method
+
+    # Add SIGN using 2D cross product
+    cross = v1[0] * v2[1] - v1[1] * v2[0]
+    sign = np.sign(cross)
+
+    return angle * sign
 
 # -----------------------------
 # 1) Select and load MOT
@@ -122,12 +145,12 @@ def analyze_video(video_path, analyze_side="both"):
             }
 
             if analyze_side in ["left", "both"]:
-                row["left_knee_angle"] = calculate_angle(kp[left_leg[0]], kp[left_leg[1]], kp[left_leg[2]])
-                row["left_hip_angle"] = calculate_angle(kp[left_hip[0]], kp[left_hip[1]], kp[left_hip[2]])
+                row["left_knee_angle"] = calculate_knee_angle(kp[left_leg[0]], kp[left_leg[1]], kp[left_leg[2]])
+                row["left_hip_angle"] = calculate_hip_angle(kp[left_hip[0]], kp[left_hip[1]], kp[left_hip[2]])
 
             if analyze_side in ["right", "both"]:
-                row["right_knee_angle"] = calculate_angle(kp[right_leg[0]], kp[right_leg[1]], kp[right_leg[2]])
-                row["right_hip_angle"] = calculate_angle(kp[right_hip[0]], kp[right_hip[1]], kp[right_hip[2]])
+                row["right_knee_angle"] = calculate_knee_angle(kp[right_leg[0]], kp[right_leg[1]], kp[right_leg[2]])
+                row["right_hip_angle"] = calculate_hip_angle(kp[right_hip[0]], kp[right_hip[1]], kp[right_hip[2]])
 
             data.append(row)
 
@@ -308,41 +331,65 @@ def select_gait_cycle(df, analyze_side):
 # -----------------------------
 def plot_normalized_gait_cycle(df_gait, analyze_side):
     """
-    Plots the selected gait cycle from 0–100%, 
-    showing only right, left, or both sides.
+    Plots gait cycle from 0–100%.
+    analyze_side: 'right', 'left', or 'both'
 
-    analyze_side: "right", "left", or "both"
+    If 'both' → 4 subplots, each containing L+R curves of the same variable.
     """
 
-    # Close any previous figures
     plt.close("all")
-
-    # Columns and subplot titles
-    columns = ["right_knee_angle_smooth", "right_hip_angle_smooth",
-               "knee_angle_r", "hip_flexion_r"]
-    titles = ["Right Knee Angle (Video)", "Right Hip Angle (Video)",
-              "Right Knee Angle (MOT)", "Right Hip Angle (MOT)"]
-
-    # Filter out missing columns
-    columns = [c for c in columns if c in df_gait.columns]
-    titles = titles[:len(columns)]
-
-    if not columns:
-        print("❌ None of the required columns are in the dataframe.")
-        return
 
     gait_cycle = df_gait["time_norm"]
 
-    # Create figure
-    fig, axs = plt.subplots(len(columns), 1, figsize=(10, 3 * len(columns)), sharex=True)
+    # --------------------------
+    # Define mapping of variables
+    # --------------------------
+    variables = [
+        ("knee_angle_video", "right_knee_angle_smooth", "left_knee_angle_smooth", 
+         "Knee Angle (Video)"),
+        ("hip_angle_video", "right_hip_angle_smooth", "left_hip_angle_smooth",
+         "Hip Angle (Video)"),
+        ("knee_angle_mot", "knee_angle_r", "knee_angle_l",
+         "Knee Angle (MOT)"),
+        ("hip_angle_mot", "hip_flexion_r", "hip_flexion_l",
+         "Hip Angle (MOT)")
+    ]
 
-    if len(columns) == 1:
+    # --------------------------
+    # Build list of plots
+    # --------------------------
+    plot_items = []
+
+    for var_name, col_r, col_l, title in variables:
+        if analyze_side == "right" and col_r in df_gait.columns:
+            plot_items.append(([col_r], title))
+
+        elif analyze_side == "left" and col_l in df_gait.columns:
+            plot_items.append(([col_l], title))
+
+        elif analyze_side == "both":
+            cols = []
+            if col_r in df_gait.columns: cols.append(col_r)
+            if col_l in df_gait.columns: cols.append(col_l)
+            if cols:
+                plot_items.append((cols, title))
+
+    if not plot_items:
+        print("❌ No valid columns found for plotting.")
+        return
+
+    # --------------------------
+    # Make the subplots
+    # --------------------------
+    fig, axs = plt.subplots(len(plot_items), 1, figsize=(10, 3 * len(plot_items)), sharex=True)
+    if len(plot_items) == 1:
         axs = [axs]
 
-    # Plot each column
-    for ax, col, title in zip(axs, columns, titles):
-        ax.plot(gait_cycle, df_gait[col], label=col)
-        ax.set_ylabel("Angle (degrees)")
+    for ax, (cols, title) in zip(axs, plot_items):
+        for col in cols:
+            ax.plot(gait_cycle, df_gait[col], label=col)
+
+        ax.set_ylabel("Angle (°)")
         ax.set_title(title)
         ax.grid(True)
         ax.legend()
@@ -350,8 +397,13 @@ def plot_normalized_gait_cycle(df_gait, analyze_side):
     axs[-1].set_xlabel("Gait Cycle (%)")
 
     plt.tight_layout()
-    plt.savefig(os.path.join(SAVE_DIR_PLOTS, f"gait_cycle_{analyze_side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"))
+    plt.savefig(os.path.join(
+        SAVE_DIR_PLOTS,
+        f"gait_cycle_{analyze_side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    ))
     plt.show()
+
+
 
 # -----------------------------
 # 8) Main workflow
@@ -383,6 +435,11 @@ def main():
 
     if gait_cycle_df is not None:
         out_file_cycle = "csv_files/gait_cycle_results.csv"
+
+        # Ensure the folder exists
+        os.makedirs(os.path.dirname(out_file_cycle), exist_ok=True)
+
+        # Save gait cycle data
         gait_cycle_df.to_csv(out_file_cycle, index=False)
         print("💾 Saved gait cycle data:", out_file_cycle)
 
