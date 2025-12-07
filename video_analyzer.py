@@ -6,7 +6,7 @@ from ultralytics import YOLO
 from datetime import datetime
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
-from scipy import interpolate
+from scipy import interpolate, stats
 from tkinter import Tk
 from tkinter.filedialog import askopenfilename
 from matplotlib.widgets import Cursor
@@ -496,7 +496,162 @@ def plot_normalized_gait_cycles(df_gait, analyze_side):
 
 
 # -----------------------------
-# 8) Main workflow
+# 8) Compare methods
+# -----------------------------
+def ICC2_1(data):
+    """
+    Computes Interclass Correlation Coefficient ICC(2,1) — two-way random, absolute agreement, single rater.
+    data should be Nxk (subjects x methods).
+    """
+    data = np.asarray(data)
+    n, k = data.shape
+
+    mean_raters = np.mean(data, axis=0)
+    mean_subjects = np.mean(data, axis=1)
+    grand_mean = np.mean(data)
+
+    # Mean squares
+    MS_subjects = np.sum((mean_subjects - grand_mean)**2) * k / (n - 1)
+    MS_raters   = np.sum((mean_raters - grand_mean)**2) * n / (k - 1)
+    MS_error    = np.sum((data - mean_subjects[:, None] - mean_raters + grand_mean)**2) / ((k - 1)*(n - 1))
+
+    ICC = (MS_subjects - MS_error) / (MS_subjects + (k - 1)*MS_error + k*(MS_raters - MS_error)/n)
+    return ICC
+
+
+def compare_gait_methods(df_gait, analyze_side):
+    """
+    Compares cycle-mean VIDEO vs MOT measurement methods for:
+        - Knee angles
+        - Hip angles
+
+    Returns metrics:
+        - Absolute Error (array)
+        - MAE
+        - Mean Bias
+        - ICC
+        - Cross-correlation coefficient
+        - Pearson correlation coefficient
+    """
+
+    # Common normalized grid
+    common_x = np.linspace(0, 100, 101)
+    cycle_ids = df_gait['cycle_id'].unique()
+
+    # ============================
+    # Variables to compare
+    # ============================
+    variable_pairs = [
+        ("knee_angle_video", "right_knee_angle_smooth", "left_knee_angle_smooth",
+         "knee_angle_mot",   "knee_angle_r",           "knee_angle_l",
+         "Knee Angle"),
+        
+        ("hip_angle_video",  "right_hip_angle_smooth", "left_hip_angle_smooth",
+         "hip_angle_mot",    "hip_flexion_r",          "hip_flexion_l",
+         "Hip Angle")
+    ]
+
+    results = {}
+
+    for video_name, video_r, video_l, mot_name, mot_r, mot_l, label in variable_pairs:
+
+        # Pick appropriate side columns
+        def pick(col_r, col_l):
+            if analyze_side == "right": return col_r
+            if analyze_side == "left":  return col_l
+            if analyze_side == "both":  # average both later
+                return (col_r, col_l)
+        
+        col_video = pick(video_r, video_l)
+        col_mot   = pick(mot_r,   mot_l)
+
+        # Skip if columns absent
+        def col_exists(c):
+            if isinstance(c, tuple):
+                return all([(cc in df_gait.columns) for cc in c])
+            return c in df_gait.columns
+
+        if not col_exists(col_video) or not col_exists(col_mot):
+            print(f"Skipping {label}: Missing required columns.")
+            continue
+
+        # -----------------------------------
+        # A) Extract and resample cycles
+        # -----------------------------------
+        video_cycles = []
+        mot_cycles   = []
+
+        for cid in cycle_ids:
+            subset = df_gait[df_gait['cycle_id'] == cid]
+            if len(subset) < 2:
+                continue
+
+            # helper
+            def interp_col(col):
+                if isinstance(col, tuple):
+                    # both sides → average of interpolated curves
+                    f1 = interpolate.interp1d(subset['time_norm'], subset[col[0]],
+                                              kind="linear", fill_value="extrapolate")
+                    f2 = interpolate.interp1d(subset['time_norm'], subset[col[1]],
+                                              kind="linear", fill_value="extrapolate")
+                    return (f1(common_x) + f2(common_x)) / 2
+                else:
+                    f = interpolate.interp1d(subset['time_norm'], subset[col],
+                                             kind="linear", fill_value="extrapolate")
+                    return f(common_x)
+
+            video_cycles.append(interp_col(col_video))
+            mot_cycles.append(interp_col(col_mot))
+
+        if len(video_cycles) == 0:
+            print(f"No valid cycles for {label}.")
+            continue
+
+        video_cycles = np.array(video_cycles)
+        mot_cycles   = np.array(mot_cycles)
+
+        # -----------------------------------
+        # B) Compute mean curves
+        # -----------------------------------
+        mean_video = np.mean(video_cycles, axis=0)
+        mean_mot   = np.mean(mot_cycles,   axis=0)
+
+        # -----------------------------------
+        # C) Compute metrics
+        # -----------------------------------
+        diff = mean_video - mean_mot
+
+        abs_error = np.abs(diff)
+        mae = np.mean(abs_error)
+        mean_bias = np.mean(diff)
+
+        # ICC (2,1)
+        icc = ICC2_1(np.vstack([mean_video, mean_mot]).T)
+
+        # Cross correlation
+        cross_corr = np.max(np.correlate(mean_video - mean_video.mean(),
+                                         mean_mot   - mean_mot.mean(),
+                                         mode="full"))
+        cross_corr /= (np.std(mean_video) * np.std(mean_mot) * len(mean_video))
+
+        # Pearson r
+        pearson_r, _ = stats.pearsonr(mean_video, mean_mot)
+
+        results[label] = {
+            "mean_video": mean_video,
+            "mean_mot":   mean_mot,
+            "abs_error_curve": abs_error,
+            "MAE": mae,
+            "mean_bias": mean_bias,
+            "ICC2_1": icc,
+            "cross_correlation": cross_corr,
+            "pearson_r": pearson_r
+        }
+
+    return results
+
+# -----------------------------
+# 9) Main workflow
 # -----------------------------
 def main():
 
@@ -542,6 +697,17 @@ def main():
 
     if gait_cycle_df is not None:
         plot_normalized_gait_cycles(gait_cycle_df, analyze_side)
+
+    # 9) Compare methods
+    if gait_cycle_df is not None:
+        comparison_results = compare_gait_methods(gait_cycle_df, analyze_side)
+        for joint, metrics in comparison_results.items():
+            print(f"\n📊 {joint} Comparison Metrics:")
+            print(f" - MAE: {metrics['MAE']:.2f} degrees")
+            print(f" - Mean Bias: {metrics['mean_bias']:.2f} degrees")
+            print(f" - ICC(2,1): {metrics['ICC2_1']:.3f}")
+            print(f" - Cross-correlation: {metrics['cross_correlation']:.3f}")
+            print(f" - Pearson r: {metrics['pearson_r']:.3f}")
 
 
 # -----------------------------
