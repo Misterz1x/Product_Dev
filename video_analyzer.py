@@ -10,7 +10,14 @@ from scipy import interpolate, stats
 from tkinter import Tk
 from tkinter.filedialog import askopenfilename
 from matplotlib.widgets import Cursor
-
+import tempfile
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak
+)
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
 
 # -----------------------------
 # Configuration
@@ -498,160 +505,402 @@ def plot_normalized_gait_cycles(df_gait, analyze_side):
 # -----------------------------
 # 8) Compare methods
 # -----------------------------
-def ICC2_1(data):
+def ICC2_1_matrix(data):
     """
-    Computes Interclass Correlation Coefficient ICC(2,1) — two-way random, absolute agreement, single rater.
-    data should be Nxk (subjects x methods).
+    Compute ICC(2,1) on a data matrix shaped (subjects, raters).
+    Two-way random, absolute agreement, single rater.
+    Returns ICC float.
     """
     data = np.asarray(data)
-    n, k = data.shape
+    if data.ndim != 2:
+        raise ValueError("ICC2_1_matrix expects a 2D array (subjects x raters).")
+    n, k = data.shape  # n subjects, k raters
 
-    mean_raters = np.mean(data, axis=0)
-    mean_subjects = np.mean(data, axis=1)
+    # means
+    mean_subject = np.mean(data, axis=1, keepdims=True)  # n x 1
+    mean_rater = np.mean(data, axis=0, keepdims=True)    # 1 x k
     grand_mean = np.mean(data)
 
-    # Mean squares
-    MS_subjects = np.sum((mean_subjects - grand_mean)**2) * k / (n - 1)
-    MS_raters   = np.sum((mean_raters - grand_mean)**2) * n / (k - 1)
-    MS_error    = np.sum((data - mean_subjects[:, None] - mean_raters + grand_mean)**2) / ((k - 1)*(n - 1))
+    # Sum squares
+    SS_subjects = np.sum((mean_subject - grand_mean)**2) * k
+    SS_raters = np.sum((mean_rater - grand_mean)**2) * n
+    SS_total = np.sum((data - grand_mean)**2)
+    SS_error = SS_total - SS_subjects - SS_raters
 
-    ICC = (MS_subjects - MS_error) / (MS_subjects + (k - 1)*MS_error + k*(MS_raters - MS_error)/n)
+    MS_subjects = SS_subjects / (n - 1)
+    MS_raters = SS_raters / (k - 1)
+    MS_error = SS_error / ((k - 1) * (n - 1))
+
+    # ICC(2,1)
+    denom = MS_subjects + (k - 1) * MS_error + (k * (MS_raters - MS_error) / n)
+    if denom == 0:
+        return np.nan
+    ICC = (MS_subjects - MS_error) / denom
     return ICC
 
-
-def compare_gait_methods(df_gait, analyze_side):
+def max_normalized_crosscorr(a, b):
     """
-    Compares cycle-mean VIDEO vs MOT measurement methods for:
-        - Knee angles
-        - Hip angles
-
-    Returns metrics:
-        - Absolute Error (array)
-        - MAE
-        - Mean Bias
-        - ICC
-        - Cross-correlation coefficient
-        - Pearson correlation coefficient
+    Compute maximum normalized cross-correlation between 1D arrays a and b.
+    Returns float in [-1,1].
     """
+    a = np.asarray(a) - np.mean(a)
+    b = np.asarray(b) - np.mean(b)
+    corr = np.correlate(a, b, mode='full')
+    denom = np.std(a) * np.std(b) * len(a)
+    if denom == 0:
+        return np.nan
+    return np.max(corr) / denom
 
-    # Common normalized grid
+# ---------------------------
+# Core comparison function
+# ---------------------------
+def compare_gait_methods(df_gait, analyze_side="right"):
+    """
+    Extract cycles, resample to 0-100% (101 points), compute mean curves,
+    compute per-cycle MAE and bias, and overall metrics.
+
+    Returns a results dict with entries for 'Knee Angle' and 'Hip Angle'.
+    Each entry contains:
+      - mean_video (101,)
+      - mean_mot   (101,)
+      - sd_video (101,)
+      - sd_mot   (101,)
+      - abs_error_curve (101,)
+      - MAE_curve (float)
+      - mean_bias (float)
+      - pearson_r (float)
+      - cross_corr_max (float)
+      - ICC_time (ICC computed with 101 subjects x 2 raters using mean curves)
+      - ICC_cycles (ICC computed across cycles using per-cycle mean values)
+      - per_cycle_MAE (array length = n_cycles)
+      - per_cycle_bias (array length = n_cycles)
+      - n_cycles (int)
+    """
     common_x = np.linspace(0, 100, 101)
-    cycle_ids = df_gait['cycle_id'].unique()
+    cycle_ids = np.unique(df_gait['cycle_id'].values)
 
-    # ============================
-    # Variables to compare
-    # ============================
-    variable_pairs = [
-        ("knee_angle_video", "right_knee_angle_smooth", "left_knee_angle_smooth",
-         "knee_angle_mot",   "knee_angle_r",           "knee_angle_l",
-         "Knee Angle"),
-        
-        ("hip_angle_video",  "right_hip_angle_smooth", "left_hip_angle_smooth",
-         "hip_angle_mot",    "hip_flexion_r",          "hip_flexion_l",
-         "Hip Angle")
+    variables = [
+        ("Knee Angle",
+         "right_knee_angle_smooth", "left_knee_angle_smooth",
+         "knee_angle_r", "knee_angle_l"),
+        ("Hip Angle",
+         "right_hip_angle_smooth", "left_hip_angle_smooth",
+         "hip_flexion_r", "hip_flexion_l")
     ]
 
     results = {}
 
-    for video_name, video_r, video_l, mot_name, mot_r, mot_l, label in variable_pairs:
-
-        # Pick appropriate side columns
+    for label, vid_r, vid_l, mot_r, mot_l in variables:
+        # choose columns based on analyze_side
         def pick(col_r, col_l):
             if analyze_side == "right": return col_r
-            if analyze_side == "left":  return col_l
-            if analyze_side == "both":  # average both later
-                return (col_r, col_l)
-        
-        col_video = pick(video_r, video_l)
-        col_mot   = pick(mot_r,   mot_l)
+            if analyze_side == "left": return col_l
+            if analyze_side == "both": return (col_r, col_l)
+            raise ValueError("analyze_side must be 'right', 'left' or 'both'.")
 
-        # Skip if columns absent
-        def col_exists(c):
+        col_video = pick(vid_r, vid_l)
+        col_mot = pick(mot_r, mot_l)
+
+        # validate columns
+        def exists(c):
             if isinstance(c, tuple):
-                return all([(cc in df_gait.columns) for cc in c])
+                return all([cc in df_gait.columns for cc in c])
             return c in df_gait.columns
 
-        if not col_exists(col_video) or not col_exists(col_mot):
-            print(f"Skipping {label}: Missing required columns.")
+        if not exists(col_video) or not exists(col_mot):
+            print(f"[compare_gait_methods] Missing columns for {label}; skipping.")
             continue
 
-        # -----------------------------------
-        # A) Extract and resample cycles
-        # -----------------------------------
         video_cycles = []
-        mot_cycles   = []
+        mot_cycles = []
+        per_cycle_mae = []
+        per_cycle_bias = []
 
         for cid in cycle_ids:
             subset = df_gait[df_gait['cycle_id'] == cid]
             if len(subset) < 2:
                 continue
 
-            # helper
+            # interpolation helper
             def interp_col(col):
                 if isinstance(col, tuple):
-                    # both sides → average of interpolated curves
                     f1 = interpolate.interp1d(subset['time_norm'], subset[col[0]],
-                                              kind="linear", fill_value="extrapolate")
+                                              kind='linear', fill_value='extrapolate')
                     f2 = interpolate.interp1d(subset['time_norm'], subset[col[1]],
-                                              kind="linear", fill_value="extrapolate")
-                    return (f1(common_x) + f2(common_x)) / 2
+                                              kind='linear', fill_value='extrapolate')
+                    return 0.5 * (f1(common_x) + f2(common_x))
                 else:
                     f = interpolate.interp1d(subset['time_norm'], subset[col],
-                                             kind="linear", fill_value="extrapolate")
+                                             kind='linear', fill_value='extrapolate')
                     return f(common_x)
 
-            video_cycles.append(interp_col(col_video))
-            mot_cycles.append(interp_col(col_mot))
+            v = interp_col(col_video)
+            m = interp_col(col_mot)
+            video_cycles.append(v)
+            mot_cycles.append(m)
+
+            per_cycle_mae.append(np.mean(np.abs(v - m)))
+            per_cycle_bias.append(np.mean(v - m))
 
         if len(video_cycles) == 0:
-            print(f"No valid cycles for {label}.")
+            print(f"[compare_gait_methods] No valid cycles for {label}; skipping.")
             continue
 
-        video_cycles = np.array(video_cycles)
-        mot_cycles   = np.array(mot_cycles)
+        video_cycles = np.vstack(video_cycles)  # n_cycles x 101
+        mot_cycles = np.vstack(mot_cycles)
 
-        # -----------------------------------
-        # B) Compute mean curves
-        # -----------------------------------
+        # mean & sd
         mean_video = np.mean(video_cycles, axis=0)
-        mean_mot   = np.mean(mot_cycles,   axis=0)
+        mean_mot = np.mean(mot_cycles, axis=0)
+        sd_video = np.std(video_cycles, axis=0, ddof=1)
+        sd_mot = np.std(mot_cycles, axis=0, ddof=1)
 
-        # -----------------------------------
-        # C) Compute metrics
-        # -----------------------------------
-        diff = mean_video - mean_mot
+        # metrics on mean curves
+        diff_curve = mean_video - mean_mot
+        abs_error_curve = np.abs(diff_curve)
+        MAE_curve = np.mean(abs_error_curve)
+        mean_bias = np.mean(diff_curve)
 
-        abs_error = np.abs(diff)
-        mae = np.mean(abs_error)
-        mean_bias = np.mean(diff)
+        # pearson on mean curves
+        try:
+            pearson_r, pearson_p = stats.pearsonr(mean_video, mean_mot)
+        except Exception:
+            pearson_r, pearson_p = np.nan, np.nan
 
-        # ICC (2,1)
-        icc = ICC2_1(np.vstack([mean_video, mean_mot]).T)
+        # cross-correlation max normalized
+        cross_corr_max = max_normalized_crosscorr(mean_video, mean_mot)
 
-        # Cross correlation
-        cross_corr = np.max(np.correlate(mean_video - mean_video.mean(),
-                                         mean_mot   - mean_mot.mean(),
-                                         mode="full"))
-        cross_corr /= (np.std(mean_video) * np.std(mean_mot) * len(mean_video))
+        # ICC across timepoints (treat each timepoint as subject, two raters = mean_video & mean_mot)
+        stacked_time = np.vstack([mean_video, mean_mot]).T  # 101 x 2
+        icc_time = ICC2_1_matrix(stacked_time)
 
-        # Pearson r
-        pearson_r, _ = stats.pearsonr(mean_video, mean_mot)
+        # ICC across cycles: compute per-cycle mean value for each cycle for video and mot
+        per_cycle_mean_video = np.mean(video_cycles, axis=1)  # n_cycles
+        per_cycle_mean_mot = np.mean(mot_cycles, axis=1)
+        stacked_cycles = np.vstack([per_cycle_mean_video, per_cycle_mean_mot]).T  # n_cycles x 2
+        icc_cycles = ICC2_1_matrix(stacked_cycles)
 
         results[label] = {
             "mean_video": mean_video,
-            "mean_mot":   mean_mot,
-            "abs_error_curve": abs_error,
-            "MAE": mae,
+            "mean_mot": mean_mot,
+            "sd_video": sd_video,
+            "sd_mot": sd_mot,
+            "abs_error_curve": abs_error_curve,
+            "MAE_curve": MAE_curve,
             "mean_bias": mean_bias,
-            "ICC2_1": icc,
-            "cross_correlation": cross_corr,
-            "pearson_r": pearson_r
+            "pearson_r": pearson_r,
+            "pearson_p": pearson_p,
+            "cross_corr_max": cross_corr_max,
+            "ICC_time": icc_time,
+            "ICC_cycles": icc_cycles,
+            "per_cycle_MAE": np.array(per_cycle_mae),
+            "per_cycle_bias": np.array(per_cycle_bias),
+            "n_cycles": video_cycles.shape[0],
+            "common_x": common_x
         }
 
     return results
 
+# ---------------------------
+# 9) Plotting functions 
+# ---------------------------
+def _save_fig(fig, path, dpi=200):
+    fig.tight_layout()
+    fig.savefig(path, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
+    return path
+
+def plot_mean_sd_overlay(mean_video, sd_video, mean_mot, sd_mot, common_x, title, out_path):
+    fig, ax = plt.subplots(figsize=(7.4, 4.5))  # fits A4 nicely when inserted
+    ax.plot(common_x, mean_video, label='Video Mean', linewidth=2)
+    ax.fill_between(common_x, mean_video - sd_video, mean_video + sd_video, alpha=0.25)
+    ax.plot(common_x, mean_mot, label='MOT Mean', linewidth=2)
+    ax.fill_between(common_x, mean_mot - sd_mot, mean_mot + sd_mot, alpha=0.25)
+    ax.set_xlabel('Gait Cycle (%)')
+    ax.set_ylabel('Angle (°)')
+    ax.set_title(title + " — Mean ± SD")
+    ax.legend()
+    ax.grid(alpha=0.4, linestyle='--')
+    return _save_fig(fig, out_path)
+
+def plot_abs_error_curve(abs_error_curve, common_x, title, out_path):
+    fig, ax = plt.subplots(figsize=(7.4, 4.0))
+    ax.plot(common_x, abs_error_curve, linewidth=2)
+    ax.set_xlabel('Gait Cycle (%)')
+    ax.set_ylabel('Absolute Error (°)')
+    ax.set_title(title + ' — Absolute Error Curve')
+    ax.grid(alpha=0.4, linestyle='--')
+    return _save_fig(fig, out_path)
+
+def plot_bland_altman(mean_video, mean_mot, title, out_path):
+    fig, ax = plt.subplots(figsize=(7.4, 5.0))
+    mean_vals = 0.5 * (mean_video + mean_mot)
+    diff = mean_video - mean_mot
+    md = np.mean(diff)
+    sd = np.std(diff, ddof=1)
+    ax.scatter(mean_vals, diff, alpha=0.6)
+    ax.axhline(md, color='red', linestyle='-')
+    ax.axhline(md + 1.96*sd, color='gray', linestyle='--')
+    ax.axhline(md - 1.96*sd, color='gray', linestyle='--')
+    ax.set_xlabel('Mean of Methods (°)')
+    ax.set_ylabel('Difference (Video - MOT) (°)')
+    ax.set_title(title + ' — Bland–Altman')
+    ax.grid(alpha=0.3, linestyle='--')
+    # Annotate bias and limits
+    ax.text(0.02, 0.95, f"Bias = {md:.3f}\n±1.96 SD = [{md-1.96*sd:.3f}, {md+1.96*sd:.3f}]",
+            transform=ax.transAxes, verticalalignment='top',
+            bbox=dict(boxstyle="round,pad=0.3", fc="wheat", alpha=0.4))
+    return _save_fig(fig, out_path)
+
+def plot_mae_boxplot(per_cycle_MAE, title, out_path):
+    fig, ax = plt.subplots(figsize=(6.0, 4.0))
+    ax.boxplot(per_cycle_MAE, vert=True, widths=0.5, patch_artist=True)
+    ax.set_ylabel('MAE per cycle (°)')
+    ax.set_title(title + ' — Per-cycle MAE (boxplot)')
+    ax.grid(alpha=0.3, linestyle='--')
+    return _save_fig(fig, out_path)
+
+def plot_scatter_mot_vs_video(mean_mot, mean_video, title, out_path):
+    fig, ax = plt.subplots(figsize=(6.5, 5.0))
+    ax.scatter(mean_mot, mean_video, alpha=0.7)
+    # regression line
+    try:
+        slope, intercept, r_value, p_value, std_err = stats.linregress(mean_mot, mean_video)
+        xs = np.linspace(np.min(mean_mot), np.max(mean_mot), 100)
+        ax.plot(xs, slope*xs + intercept, linestyle='-', linewidth=2, label=f"y={slope:.3f}x+{intercept:.3f}\nR={r_value:.3f}")
+    except Exception:
+        r_value = np.nan
+    ax.set_xlabel('MOT')
+    ax.set_ylabel('Video')
+    ax.set_title(title + ' — MOT vs Video')
+    ax.legend()
+    ax.grid(alpha=0.3, linestyle='--')
+    return _save_fig(fig, out_path)
+
+
+# ---------------------------
+# 10) PDF Report generator
+# ---------------------------
+def generate_gait_report(results, pdf_path, metadata=None):
+    """
+    Generate compact PDF report (Option 2 style) using ReportLab.
+    `results` is the dict returned by compare_gait_methods.
+    `pdf_path` is full path to output PDF.
+    `metadata` is optional dict: e.g. {'subject': 'S01', 'side': 'right', 'date': '...'}
+    """
+    if metadata is None:
+        metadata = {}
+
+    tmpdir = tempfile.mkdtemp(prefix="gait_report_")
+    images = {}
+
+    # Create all plots for each label
+    for label, res in results.items():
+        c = res['common_x']
+        # filepaths
+        images[label] = {}
+        images[label]['mean_sd'] = os.path.join(tmpdir, f"{label}_mean_sd.png")
+        images[label]['abs_err'] = os.path.join(tmpdir, f"{label}_abs_err.png")
+        images[label]['ba'] = os.path.join(tmpdir, f"{label}_bland_altman.png")
+        images[label]['box'] = os.path.join(tmpdir, f"{label}_mae_box.png")
+        images[label]['scatter'] = os.path.join(tmpdir, f"{label}_scatter.png")
+
+        # generate
+        plot_mean_sd_overlay(res['mean_video'], res['sd_video'],
+                             res['mean_mot'], res['sd_mot'], c, label, images[label]['mean_sd'])
+
+        plot_abs_error_curve(res['abs_error_curve'], c, label, images[label]['abs_err'])
+        plot_bland_altman(res['mean_video'], res['mean_mot'], label, images[label]['ba'])
+        plot_mae_boxplot(res['per_cycle_MAE'], label, images[label]['box'])
+        plot_scatter_mot_vs_video(res['mean_mot'], res['mean_video'], label, images[label]['scatter'])
+
+    # Build PDF
+    doc = SimpleDocTemplate(pdf_path, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=18*mm, bottomMargin=18*mm)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Title Page (compact)
+    title_text = metadata.get('title', 'Compact Gait Comparison Report')
+    story.append(Paragraph(f"<b>{title_text}</b>", styles['Title']))
+    story.append(Spacer(1, 6))
+    info_lines = []
+    info_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if 'subject' in metadata: info_lines.append(f"Subject: {metadata['subject']}")
+    if 'side' in metadata: info_lines.append(f"Side: {metadata['side']}")
+    if 'notes' in metadata: info_lines.append(f"Notes: {metadata['notes']}")
+    for ln in info_lines:
+        story.append(Paragraph(ln, styles['Normal']))
+    story.append(Spacer(1, 8))
+
+    # Summary Table (one row per label)
+    table_data = [["Measure", "N cycles", "MAE (°)", "Bias (°)", "ICC_time", "ICC_cycles", "Pearson r", "Cross-corr"]]
+    for label, res in results.items():
+        table_data.append([
+            label,
+            f"{res['n_cycles']}",
+            f"{res['MAE_curve']:.3f}",
+            f"{res['mean_bias']:.3f}",
+            f"{res['ICC_time']:.3f}" if not np.isnan(res['ICC_time']) else "NaN",
+            f"{res['ICC_cycles']:.3f}" if not np.isnan(res['ICC_cycles']) else "NaN",
+            f"{res['pearson_r']:.3f}" if not np.isnan(res['pearson_r']) else "NaN",
+            f"{res['cross_corr_max']:.3f}" if not np.isnan(res['cross_corr_max']) else "NaN",
+        ])
+
+    t = Table(table_data, colWidths=[60*mm, 18*mm, 20*mm, 20*mm, 22*mm, 24*mm, 18*mm, 24*mm])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.lightblue),
+        ('GRID', (0,0), (-1,-1), 0.4, colors.grey),
+        ('ALIGN',(1,0),(-1,-1),'CENTER'),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 8))
+
+    # For each label add plots: (scatter + BA) on one page, (mean±sd + abs err) on next, boxplot at bottom
+    for label, res in results.items():
+        # page header
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(f"<b>{label}</b>", styles['Heading2']))
+        story.append(Spacer(1, 6))
+
+        # Row: scatter (left) and BA (right)
+        im_scatter = Image(images[label]['scatter'], width=90*mm, height=65*mm)
+        im_ba = Image(images[label]['ba'], width=90*mm, height=65*mm)
+        # Put them in a simple table for side-by-side placement
+        story.append(Table([[im_scatter, im_ba]], colWidths=[95*mm, 95*mm]))
+        story.append(Spacer(1, 8))
+
+        # Row: mean±sd + abs error
+        im_mean = Image(images[label]['mean_std'], width=95*mm, height=65*mm)
+        im_abs = Image(images[label]['abs_err'], width=95*mm, height=65*mm)
+        story.append(Table([[im_mean, im_abs]], colWidths=[95*mm, 95*mm]))
+        story.append(Spacer(1, 8))
+
+        # Boxplot full width
+        im_box = Image(images[label]['box'], width=170*mm, height=60*mm)
+        story.append(im_box)
+
+        story.append(PageBreak())
+
+    # Final notes page
+    story.append(Paragraph("<b>Notes</b>", styles['Heading2']))
+    story.append(Paragraph("This compact report contains summary metrics and plots comparing Video-derived kinematics from Keypoint Detection to MOT file kinematics from OpenCap. "
+                           "MAE = mean absolute error (averaged across cycle percent), bias = mean(video - mot). ICC_time treats each gait-percent point as a subject; ICC_cycles uses per-cycle means.", styles['Normal']))
+    story.append(Spacer(1, 6))
+
+    # Build PDF
+    doc.build(story)
+
+    # cleanup temp images (optional)
+    # for fdict in images.values():
+    #     for p in fdict.values():
+    #         try: os.remove(p)
+    #         except: pass
+    # os.rmdir(tmpdir)
+
+    return pdf_path
+
 # -----------------------------
-# 9) Main workflow
+# 11) Main workflow
 # -----------------------------
 def main():
 
@@ -701,13 +950,9 @@ def main():
     # 9) Compare methods
     if gait_cycle_df is not None:
         comparison_results = compare_gait_methods(gait_cycle_df, analyze_side)
-        for joint, metrics in comparison_results.items():
-            print(f"\n📊 {joint} Comparison Metrics:")
-            print(f" - MAE: {metrics['MAE']:.2f} degrees")
-            print(f" - Mean Bias: {metrics['mean_bias']:.2f} degrees")
-            print(f" - ICC(2,1): {metrics['ICC2_1']:.3f}")
-            print(f" - Cross-correlation: {metrics['cross_correlation']:.3f}")
-            print(f" - Pearson r: {metrics['pearson_r']:.3f}")
+        pdf_path = generate_gait_report(comparison_results, pdf_path="gait_compact_report.pdf",
+        metadata={"subject":"S01","side":"right","title":"Subject S01 Gait Comparison"})
+        print("\n📄 Generated gait comparison report:", pdf_path)
 
 
 # -----------------------------
