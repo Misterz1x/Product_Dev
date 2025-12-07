@@ -6,6 +6,7 @@ from ultralytics import YOLO
 from datetime import datetime
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
+from scipy import interpolate
 from tkinter import Tk
 from tkinter.filedialog import askopenfilename
 from matplotlib.widgets import Cursor
@@ -210,13 +211,14 @@ def merge_mot_and_video(mot_df, video_df):
 # -----------------------------
 # 6) Select gait cycle
 # -----------------------------
-
-def select_gait_cycle(df, analyze_side):
+def select_gait_cycles(df, analyze_side):
     """
-    Shows synchronized plots (video + MOT)
-    and allows selecting start/end time.
-    Only displays the selected side.
-    Adds a visible line after first click.
+    Shows synchronized plots (video + MOT) and allows selecting 
+    MULTIPLE gait cycles.
+    
+    - Click START then END for Cycle 1.
+    - Click START then END for Cycle 2, etc.
+    - Close the window when finished.
     """
 
     # Determine columns based on side
@@ -242,33 +244,22 @@ def select_gait_cycle(df, analyze_side):
     fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
     time = df["time"]
 
+    # --- Plotting Helper ---
+    def plot_channels(ax, title, col_list):
+        ax.set_title(title)
+        for col in col_list:
+            if col in df.columns:
+                ax.plot(time, df[col], label=col)
+        ax.legend(loc='upper right', fontsize='small')
+
     # 1 - Knee Video
-    axs[0].set_title("Knee Angle (Video)")
-    for col in video_cols[analyze_side]:
-        if "knee" in col and col in df.columns:
-            axs[0].plot(time, df[col], label=col)
-    axs[0].legend()
-
+    plot_channels(axs[0], "Knee Angle (Video)", [c for c in video_cols[analyze_side] if "knee" in c])
     # 2 - Hip Video
-    axs[1].set_title("Hip Angle (Video)")
-    for col in video_cols[analyze_side]:
-        if "hip" in col and col in df.columns:
-            axs[1].plot(time, df[col], label=col)
-    axs[1].legend()
-
+    plot_channels(axs[1], "Hip Angle (Video)", [c for c in video_cols[analyze_side] if "hip" in c])
     # 3 - Knee MOT
-    axs[2].set_title("Knee Angle (MOT)")
-    for col in mot_cols[analyze_side]:
-        if "knee" in col and col in df.columns:
-            axs[2].plot(time, df[col], label=col)
-    axs[2].legend()
-
+    plot_channels(axs[2], "Knee Angle (MOT)", [c for c in mot_cols[analyze_side] if "knee" in c])
     # 4 - Hip MOT
-    axs[3].set_title("Hip Angle (MOT)")
-    for col in mot_cols[analyze_side]:
-        if "hip" in col and col in df.columns:
-            axs[3].plot(time, df[col], label=col)
-    axs[3].legend()
+    plot_channels(axs[3], "Hip Angle (MOT)", [c for c in mot_cols[analyze_side] if "hip" in c])
 
     axs[-1].set_xlabel("Time (seconds)")
 
@@ -276,131 +267,230 @@ def select_gait_cycle(df, analyze_side):
     cursor = Cursor(axs[0], useblit=True, color='red', linewidth=1)
 
     click_times = []
-    point_line = None
 
     def onclick(event):
-        nonlocal point_line
-
         if event.inaxes not in axs:
             return
 
-        click_times.append(event.xdata)
-        print(f"Selected time: {event.xdata:.3f} sec")
+        # Store time
+        t_click = event.xdata
+        click_times.append(t_click)
+        click_count = len(click_times)
+        
+        print(f"Click {click_count}: {t_click:.3f} sec")
 
-        # After first click → draw vertical line
-        if len(click_times) == 1:
+        # Visual Feedback
+        # 1. Draw vertical line for every click
+        for ax in axs:
+            ax.axvline(t_click, color='blue', linestyle='--', alpha=0.6)
+
+        # 2. If we just finished a pair (Even number), shade the region
+        if click_count % 2 == 0:
+            t_start = click_times[-2]
+            t_end = click_times[-1]
+            # Ensure correct order for shading if user clicked backwards
+            span_min, span_max = min(t_start, t_end), max(t_start, t_end)
+            
             for ax in axs:
-                point_line = ax.axvline(event.xdata, color='blue', linestyle='--')
-            fig.canvas.draw()
+                ax.axvspan(span_min, span_max, color='green', alpha=0.15)
+            print(f"   -> Cycle pair recorded ({span_min:.2f} to {span_max:.2f})")
 
-        # After second click → close figure
-        if len(click_times) == 2:
-            plt.close(fig)
+        fig.canvas.draw()
 
     fig.canvas.mpl_connect('button_press_event', onclick)
 
-    print("\n👉 Click ONCE for gait cycle START, ONCE for gait cycle END.")
+    print("\n" + "="*60)
+    print("👉 INSTRUCTIONS:")
+    print("1. Click START, then Click END for a gait cycle.")
+    print("2. Repeat for as many cycles as you want.")
+    print("3. Close the figure window to finish processing.")
+    print("="*60 + "\n")
+    
     plt.ylabel("Angle (degrees)")
-    plt.show()
+    plt.show() # Code pauses here until window is closed
 
-    # Must have 2 points
+    # --- Post-Processing ---
+
+    # 1. Ensure even number of clicks
+    if len(click_times) % 2 != 0:
+        print(f"\n⚠️ Warning: Odd number of clicks ({len(click_times)}). Removing last click to enforce Start/End pairs.")
+        click_times.pop()
+
+    # 2. Check if we have enough data
     if len(click_times) < 2:
-        print("❌ Not enough points selected.")
+        print("❌ No complete gait cycles selected.")
         return None
 
-    # Determine cycle window
-    t_start = min(click_times)
-    t_end = max(click_times)
+    # 3. Extract and combine cycles
+    all_cycles = []
+    
+    # Iterate in steps of 2: (0,1), (2,3), (4,5)...
+    for i in range(0, len(click_times), 2):
+        t1 = click_times[i]
+        t2 = click_times[i+1]
+        
+        # Sort in case user clicked End before Start
+        t_start, t_end = min(t1, t2), max(t1, t2)
+        
+        # Slice DataFrame
+        df_cycle = df[(df["time"] >= t_start) & (df["time"] <= t_end)].copy()
+        
+        if df_cycle.empty:
+            print(f"⚠️ Warning: Cycle {i//2 + 1} empty (no data points). Skipping.")
+            continue
 
-    df_cycle = df[(df["time"] >= t_start) & (df["time"] <= t_end)].copy()
+        # Normalize Time (0-100%)
+        t0_local = df_cycle["time"].iloc[0]
+        duration = df_cycle["time"].iloc[-1] - t0_local
+        
+        # Avoid division by zero
+        if duration == 0:
+            df_cycle["time_norm"] = 0
+        else:
+            df_cycle["time_norm"] = (df_cycle["time"] - t0_local) / duration * 100
 
-    if df_cycle.empty:
-        print("❌ Selected window contains no data.")
+        # Add Cycle ID (1-based index)
+        df_cycle["cycle_id"] = (i // 2) + 1
+        
+        all_cycles.append(df_cycle)
+
+    if not all_cycles:
         return None
 
-    # Normalize to 0–100%
-    t0, t1 = df_cycle["time"].iloc[0], df_cycle["time"].iloc[-1]
-    df_cycle["time_norm"] = (df_cycle["time"] - t0) / (t1 - t0) * 100
-
-    print(f"\n✅ Gait cycle extracted from {t0:.3f} to {t1:.3f} seconds.")
-    return df_cycle
+    # Combine into one big DataFrame
+    final_df = pd.concat(all_cycles, ignore_index=True)
+    
+    print(f"\n✅ Successfully extracted {len(all_cycles)} gait cycles.")
+    return final_df
 
 
 # -----------------------------
 # 7) Plotting normalized gait cycle
 # -----------------------------
-def plot_normalized_gait_cycle(df_gait, analyze_side):
+def plot_normalized_gait_cycles(df_gait, analyze_side):
     """
-    Plots gait cycle from 0–100%.
-    analyze_side: 'right', 'left', or 'both'
-
-    If 'both' → 4 subplots, each containing L+R curves of the same variable.
+    Plots multiple gait cycles from 0–100%.
+    - Resamples all cycles to a common 101-point grid.
+    - Plots individual cycles (thin/faint).
+    - Plots the MEAN of those cycles (thick/solid).
+    - Saves to global SAVE_DIR_PLOTS.
     """
+    
+    # 1. Setup Standard Grid (0 to 100% with 101 points)
+    common_x = np.linspace(0, 100, 101)
+    cycle_ids = df_gait['cycle_id'].unique()
+    
+    print(f"Processing {len(cycle_ids)} cycles for '{analyze_side}' side...")
 
-    plt.close("all")
-
-    gait_cycle = df_gait["time_norm"]
-
-    # --------------------------
-    # Define mapping of variables
-    # --------------------------
+    # 2. Define Variables
     variables = [
-        ("knee_angle_video", "right_knee_angle_smooth", "left_knee_angle_smooth", 
-         "Knee Angle (Video)"),
-        ("hip_angle_video", "right_hip_angle_smooth", "left_hip_angle_smooth",
-         "Hip Angle (Video)"),
-        ("knee_angle_mot", "knee_angle_r", "knee_angle_l",
-         "Knee Angle (MOT)"),
-        ("hip_angle_mot", "hip_flexion_r", "hip_flexion_l",
-         "Hip Angle (MOT)")
+        ("knee_angle_video", "right_knee_angle_smooth", "left_knee_angle_smooth", "Knee Angle (Video)"),
+        ("hip_angle_video", "right_hip_angle_smooth", "left_hip_angle_smooth", "Hip Angle (Video)"),
+        ("knee_angle_mot", "knee_angle_r", "knee_angle_l", "Knee Angle (MOT)"),
+        ("hip_angle_mot", "hip_flexion_r", "hip_flexion_l", "Hip Angle (MOT)")
     ]
 
-    # --------------------------
-    # Build list of plots
-    # --------------------------
+    # 3. Build Plot List based on side 
     plot_items = []
+    
+    # We iterate over the 4 required plots
+    for i, (var_name, col_r, col_l, title) in enumerate(variables):
+        cols_to_plot = []
+        
+        # Determine the angle type (e.g., 'Knee' or 'Hip') based on the title
+        # This is the new, robust check to ensure we aren't mixing data.
+        required_angle_type = 'Knee' if 'Knee' in title else 'Hip'
 
-    for var_name, col_r, col_l, title in variables:
-        if analyze_side == "right" and col_r in df_gait.columns:
-            plot_items.append(([col_r], title))
+        # Helper function to check column relevance
+        def is_relevant(col, required_type):
+            # Check if the column exists AND contains the required angle type (e.g., 'knee' or 'hip')
+            # The .lower() prevents errors if titles/columns use different cases.
+            return col in df_gait.columns and required_type.lower() in col.lower()
 
-        elif analyze_side == "left" and col_l in df_gait.columns:
-            plot_items.append(([col_l], title))
+        # --- Filtering Logic ---
+        
+        if analyze_side == "right":
+            if is_relevant(col_r, required_angle_type):
+                cols_to_plot.append((col_r, 'tab:blue', 'Right'))
+            
+        elif analyze_side == "left":
+            if is_relevant(col_l, required_angle_type):
+                cols_to_plot.append((col_l, 'tab:orange', 'Left'))
 
         elif analyze_side == "both":
-            cols = []
-            if col_r in df_gait.columns: cols.append(col_r)
-            if col_l in df_gait.columns: cols.append(col_l)
-            if cols:
-                plot_items.append((cols, title))
+            if is_relevant(col_r, required_angle_type):
+                cols_to_plot.append((col_r, 'tab:blue', 'Right'))
+            if is_relevant(col_l, required_angle_type):
+                cols_to_plot.append((col_l, 'tab:orange', 'Left'))
+            
+        # If any columns were found for this variable, add the plot item
+        if cols_to_plot:
+            plot_items.append((cols_to_plot, title))
 
     if not plot_items:
         print("❌ No valid columns found for plotting.")
         return
 
-    # --------------------------
-    # Make the subplots
-    # --------------------------
-    fig, axs = plt.subplots(len(plot_items), 1, figsize=(10, 3 * len(plot_items)), sharex=True)
-    if len(plot_items) == 1:
-        axs = [axs]
+    # 4. Create Subplots
+    fig, axs = plt.subplots(len(plot_items), 1, figsize=(10, 3.5 * len(plot_items)), sharex=True)
+    if len(plot_items) == 1: axs = [axs]
 
-    for ax, (cols, title) in zip(axs, plot_items):
-        for col in cols:
-            ax.plot(gait_cycle, df_gait[col], label=col)
-
+    # 5. Processing and Plotting Loop 
+    for ax, (cols_info, title) in zip(axs, plot_items):
+        
+        ax.set_title(title, fontsize=12, fontweight='bold')
         ax.set_ylabel("Angle (°)")
-        ax.set_title(title)
-        ax.grid(True)
-        ax.legend()
+        
+        for col_name, color, label_prefix in cols_info:
+            # Container for resampled arrays
+            resampled_cycles = []
+
+            # --- A. Interpolate and Plot Individual Cycles ---
+            for cid in df_gait['cycle_id'].unique():
+                subset = df_gait[df_gait['cycle_id'] == cid]
+                
+                if len(subset) < 2:
+                    # print(f"Skipping cycle {cid} for {col_name}: Insufficient data points.")
+                    continue
+
+                f = interpolate.interp1d(subset['time_norm'], subset[col_name], 
+                                         kind='linear', fill_value="extrapolate")
+                
+                y_new = f(common_x)
+                resampled_cycles.append(y_new)
+                
+                # Plot individual cycle (Thin, transparent)
+                ax.plot(common_x, y_new, color=color, alpha=0.25, linewidth=1)
+            
+            # --- B. Calculate and Plot Mean ---
+            if not resampled_cycles:
+                continue
+                
+            data_matrix = np.array(resampled_cycles)
+            mean_curve = np.mean(data_matrix, axis=0)
+            
+            # Plot Mean (Thick, Solid)
+            ax.plot(common_x, mean_curve, color=color, linewidth=2.5, label=f"{label_prefix} Mean")
+            
+        ax.grid(True, which='both', linestyle='--', alpha=0.5)
+        ax.legend(loc='upper right', fontsize='small')
 
     axs[-1].set_xlabel("Gait Cycle (%)")
-
     plt.tight_layout()
-    plt.savefig(os.path.join(
-        SAVE_DIR_PLOTS,
-        f"gait_cycle_{analyze_side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    ))
+
+    # 6. Save using global SAVE_DIR_PLOTS
+    if 'SAVE_DIR_PLOTS' in globals():
+        # Ensure directory exists
+        os.makedirs(SAVE_DIR_PLOTS, exist_ok=True)
+        
+        filename = f"gait_analysis_{analyze_side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        save_path = os.path.join(SAVE_DIR_PLOTS, filename)
+        
+        plt.savefig(save_path, dpi=300)
+        print(f"✅ Plot saved to: {save_path}")
+    else:
+        print("⚠️ SAVE_DIR_PLOTS not defined. Plot not saved.")
+
     plt.show()
 
 
@@ -431,7 +521,7 @@ def main():
     combined = merge_mot_and_video(mot_df, video_df)
 
     # 6) Select gait cycle
-    gait_cycle_df = select_gait_cycle(combined, analyze_side)
+    gait_cycle_df = select_gait_cycles(combined, analyze_side)
 
     if gait_cycle_df is not None:
         out_file_cycle = "csv_files/gait_cycle_results.csv"
@@ -451,7 +541,7 @@ def main():
     # 8) Plot normalized gait cycle
 
     if gait_cycle_df is not None:
-        plot_normalized_gait_cycle(gait_cycle_df, analyze_side)
+        plot_normalized_gait_cycles(gait_cycle_df, analyze_side)
 
 
 # -----------------------------
