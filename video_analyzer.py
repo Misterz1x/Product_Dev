@@ -870,7 +870,7 @@ def generate_gait_report(results, pdf_path, metadata=None):
         story.append(Spacer(1, 8))
 
         # Row: mean±sd + abs error
-        im_mean = Image(images[label]['mean_std'], width=95*mm, height=65*mm)
+        im_mean = Image(images[label]['mean_sd'], width=95*mm, height=65*mm)
         im_abs = Image(images[label]['abs_err'], width=95*mm, height=65*mm)
         story.append(Table([[im_mean, im_abs]], colWidths=[95*mm, 95*mm]))
         story.append(Spacer(1, 8))
