@@ -13,4 +13,9 @@ After cloning the repository and installing the uv manager, using the command 'u
 
 You can now either run the script using 'uv run script.py' or activate the virtual environment using '.venv\Scripts\activate' and than run the script.
 
+To run the script successfully you need a .mot file and a video file, preferably .mp4. After running the 'video_analyzer.py' you will get asked to choose the 2 file ypu want to compare to each other. Additionally you can choos which body side you want to analyze. 
+It is best to use the side that is best seen in the video. Afterwards you will get a plot with 4 subplots that show the knee- and hip angle calculated with the pose model from the video and the angles calculated by OpenCap. In the first subplot you can use your curser
+to select as many gait cycles as you want to analyze. After closing the plot you will get a similar new plot, showing the chosen cycles and the mean value calculated from them. After closing that one aswell, the script will generate a pdf report with the most important 
+data and some comparisons of the performance of both systems. The plots, along side more data for future analyzations and the report will be saved locally.
+
 
